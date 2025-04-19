@@ -5,6 +5,7 @@ from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi
 import os
 from dotenv import load_dotenv
+import datetime  # Added for timestamp support
 
 # Load environment variables
 load_dotenv()
@@ -19,16 +20,19 @@ CORS(app, resources={
 # MongoDB connection setup
 uri = os.getenv("MONGODB_URI", "mongodb://127.0.0.1:27017/")
 client = MongoClient(uri, server_api=ServerApi('1'))
+db = client["sentiment_db"]
+collection = db["tweets"]
 
 # Verify MongoDB connection
 try:
     client.admin.command('ping')
-    print("✅ Successfully connected to MongoDB!")
+    print("✅ MongoDB connection successful!")
+    # Create collection if not exists and create index
+    if "tweets" not in db.list_collection_names():
+        db.create_collection("tweets")
+    collection.create_index([("timestamp", -1)])  # Index for sorting
 except Exception as e:
     print("❌ MongoDB connection failed:", e)
-
-db = client["sentiment_db"]
-collection = db["tweets"]
 
 @app.route("/analyze", methods=["POST"])
 def analyze_sentiment():
@@ -36,24 +40,31 @@ def analyze_sentiment():
         if not request.is_json:
             return jsonify({"error": "Request must be JSON"}), 400
             
-        text = request.json.get("text", "")
+        text = request.json.get("text", "").strip()
         if not text:
             return jsonify({"error": "Text field is required"}), 400
             
         analysis = TextBlob(text)
-        polarity = analysis.sentiment.polarity
+        polarity = float(analysis.sentiment.polarity)
         sentiment = "positive" if polarity > 0 else "negative" if polarity < 0 else "neutral"
         
-        # Store in MongoDB
-        collection.insert_one({
+        # Store in MongoDB with timestamp
+        document = {
             "text": text,
             "sentiment": sentiment,
-            "polarity": float(polarity)
-        })
-        
-        return jsonify({
-            "sentiment": sentiment,
             "polarity": polarity,
+            "timestamp": datetime.datetime.utcnow()
+        }
+        result = collection.insert_one(document)
+        
+        # Return the complete analysis data (excluding _id)
+        return jsonify({
+            "data": {
+                "text": text,
+                "sentiment": sentiment,
+                "polarity": polarity,
+                "timestamp": document["timestamp"].isoformat()
+            },
             "status": "success"
         })
         
@@ -63,7 +74,10 @@ def analyze_sentiment():
 @app.route("/history", methods=["GET"])
 def get_history():
     try:
-        history = list(collection.find({}, {"_id": 0}).limit(10))
+        # Get history sorted by newest first
+        history = list(collection.find({}, {"_id": 0})
+                      .sort("timestamp", -1)  # Newest first
+                      .limit(10))
         return jsonify({
             "data": history,
             "count": len(history),
